@@ -18,6 +18,7 @@ from prompts import (
     CHAT_USER_TEMPLATE,
     INTENT_CLASSIFIER_SYSTEM,
     INTENT_CLASSIFIER_USER_TEMPLATE,
+    STT_CONTEXT_HINT,
     STT_POSTPROCESS_PROMPT,
 )
 
@@ -134,11 +135,26 @@ def _record_utterance() -> str:
     return wav_path
 
 
-def _stt_transcribe(wav_path: str) -> str:
+def _build_stt_prompt(history: list | None = None) -> str:
+    base = STT_CONTEXT_HINT.strip()
+    if not history:
+        return base
+    recent_user = [msg.get("content", "") for msg in history[-4:] if msg.get("role") == "user"]
+    if not recent_user:
+        return base
+    joined = " ".join(recent_user).strip()
+    if len(joined) > 200:
+        joined = joined[-200:]
+    return f"{base}\nRecent utterances: {joined}"
+
+
+def _stt_transcribe(wav_path: str, prompt: str | None = None) -> str:
     _require_api_key()
     with open(wav_path, "rb") as f:
         files = {"file": ("audio.wav", f, "audio/wav")}
         data = {"model": STT_MODEL, "response_format": "json"}
+        if prompt:
+            data["prompt"] = prompt
         headers = {"Authorization": f"Bearer {API_KEY}"}
         resp = requests.post(
             f"{BASE_URL}/audio/transcriptions", headers=headers, files=files, data=data, timeout=REQUEST_TIMEOUT
@@ -290,10 +306,34 @@ class Assistant:
         self.histories = {}
         self.last_search = {}
 
+    def _apply_intent_overrides(self, text: str, intent: dict | None) -> dict:
+        intent = intent or {"intent": "chat"}
+        lowered = text.lower()
+        match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
+        if match:
+            intent = {
+                "intent": "zotero_command",
+                "command": "tab",
+                "query": match.group(1),
+                "confidence": 1.0,
+            }
+            return intent
+        if "activate zotero" in lowered or "focus zotero" in lowered:
+            intent = {"intent": "zotero_command", "command": "activate", "confidence": 1.0}
+        return intent
+
     def _get_history(self, session_id: str) -> list:
         if session_id not in self.histories:
             self.histories[session_id] = []
         return self.histories[session_id]
+
+    def _process_text_input(self, text: str, session_id: str, on_stream=None, history: list | None = None) -> tuple[str, dict]:
+        if history is None:
+            history = self._get_history(session_id)
+        intent = _classify_intent(text, history)
+        intent = self._apply_intent_overrides(text, intent)
+        response = self._dispatch(intent, text, history, session_id, on_stream=on_stream)
+        return response, intent
 
     def _dispatch(self, intent: dict, transcript: str, history: list, session_id: str, on_stream=None) -> str:
         intent_type = intent.get("intent", "chat")
@@ -369,21 +409,7 @@ class Assistant:
 
     def handle_text(self, text: str, session_id: str, on_stream=None) -> dict:
         try:
-            history = self._get_history(session_id)
-            intent = _classify_intent(text, history)
-            lowered = text.lower()
-            match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
-            if match:
-                intent = {
-                    "intent": "zotero_command",
-                    "command": "tab",
-                    "query": match.group(1),
-                    "confidence": 1.0,
-                }
-            lowered = text.lower()
-            if "activate zotero" in lowered or "focus zotero" in lowered:
-                intent = {"intent": "zotero_command", "command": "activate", "confidence": 1.0}
-            response = self._dispatch(intent, text, history, session_id, on_stream=on_stream)
+            response, intent = self._process_text_input(text, session_id, on_stream=on_stream)
             return {"transcript": text, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
             return {
@@ -394,26 +420,14 @@ class Assistant:
 
     def handle_voice(self, session_id: str, on_stream=None) -> dict:
         try:
+            history = self._get_history(session_id)
+            stt_prompt = _build_stt_prompt(history)
             wav_path = _record_utterance()
-            transcript = _stt_transcribe(wav_path)
+            transcript = _stt_transcribe(wav_path, prompt=stt_prompt)
             cleaned = _postprocess_transcript(transcript)
             if not cleaned:
                 return {"transcript": "", "response": "Heard nothing. Try again.", "intent": {"intent": "chat"}}
-            history = self._get_history(session_id)
-            intent = _classify_intent(cleaned, history)
-            lowered = cleaned.lower()
-            match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
-            if match:
-                intent = {
-                    "intent": "zotero_command",
-                    "command": "tab",
-                    "query": match.group(1),
-                    "confidence": 1.0,
-                }
-            lowered = cleaned.lower()
-            if "activate zotero" in lowered or "focus zotero" in lowered:
-                intent = {"intent": "zotero_command", "command": "activate", "confidence": 1.0}
-            response = self._dispatch(intent, cleaned, history, session_id, on_stream=on_stream)
+            response, intent = self._process_text_input(cleaned, session_id, on_stream=on_stream, history=history)
             return {"transcript": cleaned, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
             return {

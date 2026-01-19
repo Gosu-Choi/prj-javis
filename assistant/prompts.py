@@ -1,3 +1,9 @@
+STT_CONTEXT_HINT = """Academic reading assistant vocabulary and names:
+- Zotero (ZOH-tair-oh) reference manager
+- terms like Google Scholar, arXiv, page up, page down, figure, table
+- commands such as "find introduction", "activate Zotero", "go to 2nd paper"
+Prior conversation revolves around papers, citations, and navigation."""
+
 STT_POSTPROCESS_PROMPT = """You are cleaning up automatic speech-to-text for a non-native English speaker.
 Fix obvious recognition errors, keep the meaning, and do not add new content.
 Return only the cleaned sentence(s) with no extra commentary."""
