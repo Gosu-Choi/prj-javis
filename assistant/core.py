@@ -1,0 +1,423 @@
+import json
+import os
+import queue
+import re
+import subprocess
+import sys
+import time
+import wave
+from collections import deque
+from urllib.parse import quote_plus
+
+import numpy as np
+import requests
+import sounddevice as sd
+
+from prompts import (
+    CHAT_SYSTEM,
+    CHAT_USER_TEMPLATE,
+    INTENT_CLASSIFIER_SYSTEM,
+    INTENT_CLASSIFIER_USER_TEMPLATE,
+    STT_POSTPROCESS_PROMPT,
+)
+
+
+def _load_dotenv():
+    dotenv_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if not os.path.exists(dotenv_path):
+        return
+    with open(dotenv_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv()
+
+BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+API_KEY = os.environ.get("OPENAI_API_KEY")
+
+STT_MODEL = os.environ.get("STT_MODEL", "gpt-4o-mini-transcribe")
+INTENT_MODEL = os.environ.get("INTENT_MODEL", "gpt-4o-mini")
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
+POSTPROCESS_MODEL = os.environ.get("POSTPROCESS_MODEL", "gpt-4o-mini")
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "20"))
+STREAM_CHAT = os.environ.get("STREAM_CHAT", "0") == "1"
+STREAM_READ_TIMEOUT = float(os.environ.get("STREAM_READ_TIMEOUT", "5"))
+STREAM_IDLE_TIMEOUT = float(os.environ.get("STREAM_IDLE_TIMEOUT", "2"))
+
+ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
+ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
+
+SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
+INPUT_DEVICE = os.environ.get("INPUT_DEVICE")
+BLOCK_SECONDS = float(os.environ.get("BLOCK_SECONDS", "0.1"))
+START_THRESHOLD = float(os.environ.get("START_THRESHOLD", "0.015"))
+SILENCE_SECONDS = float(os.environ.get("SILENCE_SECONDS", "1.2"))
+MAX_RECORD_SECONDS = float(os.environ.get("MAX_RECORD_SECONDS", "12"))
+PREROLL_SECONDS = float(os.environ.get("PREROLL_SECONDS", "0.4"))
+
+AHK_PATH = os.environ.get("AHK_PATH", r"C:\Program Files\AutoHotkey\AutoHotkey.exe")
+AHK_SCRIPT = os.environ.get(
+    "AHK_SCRIPT", os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "ahk", "assistant.ahk"))
+)
+APP_WINDOW_TITLE = os.environ.get("APP_WINDOW_TITLE", "Academic Voice Assistant")
+
+
+def _require_api_key():
+    if not API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+
+
+def _record_utterance() -> str:
+    block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
+    max_blocks = int(MAX_RECORD_SECONDS / BLOCK_SECONDS)
+    silence_blocks = int(SILENCE_SECONDS / BLOCK_SECONDS)
+    preroll_blocks = int(PREROLL_SECONDS / BLOCK_SECONDS)
+
+    q = queue.Queue()
+    pre_roll = deque(maxlen=max(1, preroll_blocks))
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(f"[audio] {status}", file=sys.stderr)
+        q.put(indata.copy())
+
+    started = False
+    silence_count = 0
+    chunks = []
+
+    device = int(INPUT_DEVICE) if INPUT_DEVICE is not None else None
+    with sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        blocksize=block_size,
+        callback=callback,
+        device=device,
+    ):
+        while True:
+            block = q.get()
+            rms = float(np.sqrt(np.mean(block**2)))
+
+            if not started:
+                pre_roll.append(block)
+                if rms >= START_THRESHOLD:
+                    started = True
+                    chunks.extend(list(pre_roll))
+                    pre_roll.clear()
+                continue
+
+            chunks.append(block)
+            if rms < START_THRESHOLD:
+                silence_count += 1
+            else:
+                silence_count = 0
+
+            if silence_count >= silence_blocks or len(chunks) >= max_blocks:
+                break
+
+    audio = np.concatenate(chunks, axis=0)
+    audio = np.clip(audio, -1.0, 1.0)
+
+    wav_path = os.path.join(os.path.dirname(__file__), "last_utterance.wav")
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes((audio * 32767).astype(np.int16).tobytes())
+
+    return wav_path
+
+
+def _stt_transcribe(wav_path: str) -> str:
+    _require_api_key()
+    with open(wav_path, "rb") as f:
+        files = {"file": ("audio.wav", f, "audio/wav")}
+        data = {"model": STT_MODEL, "response_format": "json"}
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        resp = requests.post(
+            f"{BASE_URL}/audio/transcriptions", headers=headers, files=files, data=data, timeout=REQUEST_TIMEOUT
+        )
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("text", "").strip()
+
+
+def _postprocess_transcript(text: str) -> str:
+    if not ENABLE_POSTPROCESS or not text:
+        return text
+    _require_api_key()
+    messages = [
+        {"role": "system", "content": STT_POSTPROCESS_PROMPT},
+        {"role": "user", "content": text},
+    ]
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {"model": POSTPROCESS_MODEL, "messages": messages, "temperature": 0.0}
+    resp = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _parse_json(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
+
+
+def _format_history(history: list) -> str:
+    if not history:
+        return "(none)"
+    lines = []
+    for msg in history[-6:]:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _classify_intent(text: str, history: list) -> dict:
+    _require_api_key()
+    messages = [
+        {"role": "system", "content": INTENT_CLASSIFIER_SYSTEM},
+        {
+            "role": "user",
+            "content": INTENT_CLASSIFIER_USER_TEMPLATE.format(text=text, history=_format_history(history)),
+        },
+    ]
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {"model": INTENT_MODEL, "messages": messages, "temperature": 0.0}
+    resp = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return _parse_json(content)
+
+
+def _open_url(url: str) -> None:
+    subprocess.run([AHK_PATH, AHK_SCRIPT, "open_url", url], check=False)
+
+
+def _run_ahk(action: str, param: str | None = None) -> None:
+    args = [AHK_PATH, AHK_SCRIPT, action]
+    if param:
+        args.append(param)
+    subprocess.run(args, check=False)
+
+
+def _respond_chat(text: str, history: list, on_stream=None) -> str:
+    _require_api_key()
+    messages = [{"role": "system", "content": CHAT_SYSTEM}]
+    if history:
+        messages.extend(history[-6:])
+    messages.append({"role": "user", "content": CHAT_USER_TEMPLATE.format(text=text)})
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    body = {"model": CHAT_MODEL, "messages": messages, "temperature": 0.3}
+
+    if STREAM_CHAT and on_stream is not None:
+        body["stream"] = True
+        resp = requests.post(
+            f"{BASE_URL}/chat/completions",
+            headers=headers,
+            json=body,
+            timeout=(REQUEST_TIMEOUT, STREAM_READ_TIMEOUT),
+            stream=True,
+        )
+        resp.raise_for_status()
+        full = []
+        last_delta_time = time.time()
+        try:
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw:
+                    if full and (time.time() - last_delta_time) > STREAM_IDLE_TIMEOUT:
+                        break
+                    continue
+                if raw.startswith("data: "):
+                    data = raw[6:]
+                else:
+                    data = raw
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                    delta = payload["choices"][0].get("delta", {}).get("content", "")
+                except (KeyError, json.JSONDecodeError):
+                    continue
+                if delta:
+                    last_delta_time = time.time()
+                    full.append(delta)
+                    on_stream(delta)
+        except requests.exceptions.ReadTimeout:
+            if full:
+                return "".join(full).strip()
+            raise
+        return "".join(full).strip()
+
+    resp = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=body, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _speak(text: str) -> None:
+    if not ENABLE_TTS or not text:
+        return
+    ps = (
+        "Add-Type -AssemblyName System.Speech;"
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$s.Rate = 0;"
+        "$s.Speak($env:TTS_TEXT);"
+    )
+    env = os.environ.copy()
+    env["TTS_TEXT"] = text
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=False)
+
+
+class Assistant:
+    def __init__(self):
+        if not os.path.exists(AHK_SCRIPT):
+            raise RuntimeError(f"AHK script not found: {AHK_SCRIPT}")
+        self.histories = {}
+        self.last_search = {}
+
+    def _get_history(self, session_id: str) -> list:
+        if session_id not in self.histories:
+            self.histories[session_id] = []
+        return self.histories[session_id]
+
+    def _dispatch(self, intent: dict, transcript: str, history: list, session_id: str, on_stream=None) -> str:
+        intent_type = intent.get("intent", "chat")
+
+        if intent_type == "zotero_command":
+            command = intent.get("command", "")
+            query = intent.get("query", "").strip()
+            if not query:
+                lowered = transcript.lower()
+                if lowered.startswith("find "):
+                    query = transcript[5:].strip()
+            lowered = transcript.lower()
+            if "go to library" in lowered or "goto library" in lowered:
+                command = "library"
+            if command in {"page_down", "page_up", "find"}:
+                _run_ahk("activate_window", "Zotero")
+                if command == "find" and query:
+                    _run_ahk("find", query)
+                    response = f"OK, Zotero find: {query}"
+                else:
+                    _run_ahk(command)
+                    response = f"OK, Zotero {command.replace('_', ' ')}."
+            elif command == "tab":
+                try:
+                    n = int(query)
+                except ValueError:
+                    n = 0
+                target = n + 1
+                if 2 <= target <= 9:
+                    _run_ahk("activate_window", "Zotero")
+                    _run_ahk("zotero_tab", str(target))
+                    response = f"OK, Zotero tab {target}."
+                else:
+                    response = "I can only switch to tabs 2 through 9."
+            elif command == "library":
+                _run_ahk("activate_window", "Zotero")
+                _run_ahk("zotero_library")
+                response = "OK, Zotero library."
+            elif command == "activate":
+                _run_ahk("activate_window", "Zotero")
+                response = "OK, brought Zotero to front."
+            else:
+                response = "I did not catch a Zotero command."
+
+        elif intent_type == "web_search":
+            engine = intent.get("engine", "google")
+            query = intent.get("query", "").strip()
+            if not query and session_id in self.last_search:
+                query = self.last_search[session_id]
+            if not query:
+                query = transcript
+            if engine == "scholar":
+                url = "https://scholar.google.com/scholar?q=" + quote_plus(query)
+            else:
+                url = "https://www.google.com/search?q=" + quote_plus(query)
+            _open_url(url)
+            response = f"Searching {engine} for: {query}"
+            self.last_search[session_id] = query
+
+        else:
+            if APP_WINDOW_TITLE:
+                _run_ahk("activate_window", APP_WINDOW_TITLE)
+            response = _respond_chat(transcript, history, on_stream=on_stream)
+            history.append({"role": "user", "content": transcript})
+            history.append({"role": "assistant", "content": response})
+
+        if intent_type != "chat":
+            history.append({"role": "user", "content": transcript})
+            history.append({"role": "assistant", "content": response})
+
+        _speak(response)
+        return response
+
+    def handle_text(self, text: str, session_id: str, on_stream=None) -> dict:
+        try:
+            history = self._get_history(session_id)
+            intent = _classify_intent(text, history)
+            lowered = text.lower()
+            match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
+            if match:
+                intent = {
+                    "intent": "zotero_command",
+                    "command": "tab",
+                    "query": match.group(1),
+                    "confidence": 1.0,
+                }
+            lowered = text.lower()
+            if "activate zotero" in lowered or "focus zotero" in lowered:
+                intent = {"intent": "zotero_command", "command": "activate", "confidence": 1.0}
+            response = self._dispatch(intent, text, history, session_id, on_stream=on_stream)
+            return {"transcript": text, "response": response, "intent": intent}
+        except requests.exceptions.RequestException as exc:
+            return {
+                "transcript": text,
+                "response": f"Network error contacting API: {exc.__class__.__name__}",
+                "intent": {"intent": "chat"},
+            }
+
+    def handle_voice(self, session_id: str, on_stream=None) -> dict:
+        try:
+            wav_path = _record_utterance()
+            transcript = _stt_transcribe(wav_path)
+            cleaned = _postprocess_transcript(transcript)
+            if not cleaned:
+                return {"transcript": "", "response": "Heard nothing. Try again.", "intent": {"intent": "chat"}}
+            history = self._get_history(session_id)
+            intent = _classify_intent(cleaned, history)
+            lowered = cleaned.lower()
+            match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
+            if match:
+                intent = {
+                    "intent": "zotero_command",
+                    "command": "tab",
+                    "query": match.group(1),
+                    "confidence": 1.0,
+                }
+            lowered = cleaned.lower()
+            if "activate zotero" in lowered or "focus zotero" in lowered:
+                intent = {"intent": "zotero_command", "command": "activate", "confidence": 1.0}
+            response = self._dispatch(intent, cleaned, history, session_id, on_stream=on_stream)
+            return {"transcript": cleaned, "response": response, "intent": intent}
+        except requests.exceptions.RequestException as exc:
+            return {
+                "transcript": "",
+                "response": f"Network error contacting API: {exc.__class__.__name__}",
+                "intent": {"intent": "chat"},
+            }
