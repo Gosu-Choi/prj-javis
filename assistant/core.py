@@ -50,6 +50,7 @@ REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "20"))
 STREAM_CHAT = os.environ.get("STREAM_CHAT", "0") == "1"
 STREAM_READ_TIMEOUT = float(os.environ.get("STREAM_READ_TIMEOUT", "5"))
 STREAM_IDLE_TIMEOUT = float(os.environ.get("STREAM_IDLE_TIMEOUT", "2"))
+VOICE_RECORD_MODE = os.environ.get("VOICE_RECORD_MODE", "auto").lower()
 
 ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
@@ -74,7 +75,7 @@ def _require_api_key():
         raise RuntimeError("OPENAI_API_KEY is not set.")
 
 
-def _record_utterance() -> str:
+def _record_utterance_auto() -> str:
     block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
     max_blocks = int(MAX_RECORD_SECONDS / BLOCK_SECONDS)
     silence_blocks = int(SILENCE_SECONDS / BLOCK_SECONDS)
@@ -121,6 +122,50 @@ def _record_utterance() -> str:
 
             if silence_count >= silence_blocks or len(chunks) >= max_blocks:
                 break
+
+    audio = np.concatenate(chunks, axis=0)
+    audio = np.clip(audio, -1.0, 1.0)
+
+    wav_path = os.path.join(os.path.dirname(__file__), "last_utterance.wav")
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes((audio * 32767).astype(np.int16).tobytes())
+
+    return wav_path
+
+
+def _record_utterance_manual(stop_event: "threading.Event") -> str:
+    block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
+    max_blocks = int(MAX_RECORD_SECONDS / BLOCK_SECONDS)
+
+    q = queue.Queue()
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(f"[audio] {status}", file=sys.stderr)
+        q.put(indata.copy())
+
+    chunks = []
+    device = int(INPUT_DEVICE) if INPUT_DEVICE is not None else None
+    with sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="float32",
+        blocksize=block_size,
+        callback=callback,
+        device=device,
+    ):
+        while not stop_event.is_set() and len(chunks) < max_blocks:
+            try:
+                block = q.get(timeout=BLOCK_SECONDS)
+            except queue.Empty:
+                continue
+            chunks.append(block)
+
+    if not chunks:
+        return ""
 
     audio = np.concatenate(chunks, axis=0)
     audio = np.clip(audio, -1.0, 1.0)
@@ -202,6 +247,96 @@ def _format_history(history: list) -> str:
         label = "User" if role == "user" else "Assistant"
         lines.append(f"{label}: {content}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def _parse_tab_number(text: str) -> int | None:
+    lowered = text.lower()
+    word_map = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    ordinal_map = {
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "fifth": 5,
+        "sixth": 6,
+        "seventh": 7,
+        "eighth": 8,
+        "ninth": 9,
+        "tenth": 10,
+    }
+    match = re.search(r"\b(?:go to )?(\d+)(st|nd|rd|th)?\s+tab\b", lowered)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\btab\s+(\d+)(st|nd|rd|th)?\b", lowered)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\b(?:go to )?(\d+)(st|nd|rd|th)?\s+paper\b", lowered)
+    if match:
+        return int(match.group(1))
+    for word, value in {**word_map, **ordinal_map}.items():
+        if re.search(rf"\b(?:go to )?{word}\s+tab\b", lowered):
+            return value
+        if re.search(rf"\btab\s+{word}\b", lowered):
+            return value
+        if re.search(rf"\b(?:go to )?{word}\s+paper\b", lowered):
+            return value
+    return None
+
+
+def _parse_tab_number(text: str) -> int | None:
+    lowered = text.lower()
+    word_map = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    ordinal_map = {
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "fifth": 5,
+        "sixth": 6,
+        "seventh": 7,
+        "eighth": 8,
+        "ninth": 9,
+        "tenth": 10,
+    }
+    match = re.search(r"\b(?:go to )?(\d+)(st|nd|rd|th)?\s+tab\b", lowered)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\btab\s+(\d+)(st|nd|rd|th)?\b", lowered)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"\b(?:go to )?(\d+)(st|nd|rd|th)?\s+paper\b", lowered)
+    if match:
+        return int(match.group(1))
+    for word, value in {**word_map, **ordinal_map}.items():
+        if re.search(rf"\b(?:go to )?{word}\s+tab\b", lowered):
+            return value
+        if re.search(rf"\btab\s+{word}\b", lowered):
+            return value
+        if re.search(rf"\b(?:go to )?{word}\s+paper\b", lowered):
+            return value
+    return None
 
 
 def _classify_intent(text: str, history: list) -> dict:
@@ -309,12 +444,12 @@ class Assistant:
     def _apply_intent_overrides(self, text: str, intent: dict | None) -> dict:
         intent = intent or {"intent": "chat"}
         lowered = text.lower()
-        match = re.search(r"\bgo to (\d+)(st|nd|rd|th)? paper\b", lowered)
-        if match:
+        tab_number = _parse_tab_number(text)
+        if tab_number is not None:
             intent = {
                 "intent": "zotero_command",
                 "command": "tab",
-                "query": match.group(1),
+                "query": str(tab_number),
                 "confidence": 1.0,
             }
             return intent
@@ -327,15 +462,24 @@ class Assistant:
             self.histories[session_id] = []
         return self.histories[session_id]
 
-    def _process_text_input(self, text: str, session_id: str, on_stream=None, history: list | None = None) -> tuple[str, dict]:
+    def _process_text_input(
+        self,
+        text: str,
+        session_id: str,
+        on_stream=None,
+        on_action=None,
+        history: list | None = None,
+    ) -> tuple[str, dict]:
         if history is None:
             history = self._get_history(session_id)
         intent = _classify_intent(text, history)
         intent = self._apply_intent_overrides(text, intent)
-        response = self._dispatch(intent, text, history, session_id, on_stream=on_stream)
+        response = self._dispatch(intent, text, history, session_id, on_stream=on_stream, on_action=on_action)
         return response, intent
 
-    def _dispatch(self, intent: dict, transcript: str, history: list, session_id: str, on_stream=None) -> str:
+    def _dispatch(
+        self, intent: dict, transcript: str, history: list, session_id: str, on_stream=None, on_action=None
+    ) -> str:
         intent_type = intent.get("intent", "chat")
 
         if intent_type == "zotero_command":
@@ -351,28 +495,43 @@ class Assistant:
             if command in {"page_down", "page_up", "find"}:
                 _run_ahk("activate_window", "Zotero")
                 if command == "find" and query:
+                    if on_action:
+                        on_action("zotero_command", command)
                     _run_ahk("find", query)
                     response = f"OK, Zotero find: {query}"
                 else:
+                    if on_action:
+                        on_action("zotero_command", command)
                     _run_ahk(command)
                     response = f"OK, Zotero {command.replace('_', ' ')}."
             elif command == "tab":
+                if not query:
+                    tab_number = _parse_tab_number(transcript)
+                    if tab_number is not None:
+                        query = str(tab_number)
                 try:
                     n = int(query)
                 except ValueError:
                     n = 0
                 target = n + 1
+                print(f"[debug] zotero_tab target={target}", flush=True)
                 if 2 <= target <= 9:
+                    if on_action:
+                        on_action("zotero_command", command)
                     _run_ahk("activate_window", "Zotero")
                     _run_ahk("zotero_tab", str(target))
                     response = f"OK, Zotero tab {target}."
                 else:
                     response = "I can only switch to tabs 2 through 9."
             elif command == "library":
+                if on_action:
+                    on_action("zotero_command", command)
                 _run_ahk("activate_window", "Zotero")
                 _run_ahk("zotero_library")
                 response = "OK, Zotero library."
             elif command == "activate":
+                if on_action:
+                    on_action("zotero_command", command)
                 _run_ahk("activate_window", "Zotero")
                 response = "OK, brought Zotero to front."
             else:
@@ -407,9 +566,9 @@ class Assistant:
         _speak(response)
         return response
 
-    def handle_text(self, text: str, session_id: str, on_stream=None) -> dict:
+    def handle_text(self, text: str, session_id: str, on_stream=None, on_action=None, on_transcript=None) -> dict:
         try:
-            response, intent = self._process_text_input(text, session_id, on_stream=on_stream)
+            response, intent = self._process_text_input(text, session_id, on_stream=on_stream, on_action=on_action)
             return {"transcript": text, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
             return {
@@ -418,16 +577,36 @@ class Assistant:
                 "intent": {"intent": "chat"},
             }
 
-    def handle_voice(self, session_id: str, on_stream=None) -> dict:
+    def handle_voice(
+        self,
+        session_id: str,
+        on_stream=None,
+        on_action=None,
+        on_transcript=None,
+        record_mode: str | None = None,
+        stop_event=None,
+    ) -> dict:
         try:
             history = self._get_history(session_id)
             stt_prompt = _build_stt_prompt(history)
-            wav_path = _record_utterance()
+            mode = (record_mode or VOICE_RECORD_MODE).lower()
+            if mode == "manual":
+                if stop_event is None:
+                    return {"transcript": "", "response": "Manual record needs a stop signal.", "intent": {"intent": "chat"}}
+                wav_path = _record_utterance_manual(stop_event)
+            else:
+                wav_path = _record_utterance_auto()
+            if not wav_path:
+                return {"transcript": "", "response": "Heard nothing. Try again.", "intent": {"intent": "chat"}}
             transcript = _stt_transcribe(wav_path, prompt=stt_prompt)
             cleaned = _postprocess_transcript(transcript)
             if not cleaned:
                 return {"transcript": "", "response": "Heard nothing. Try again.", "intent": {"intent": "chat"}}
-            response, intent = self._process_text_input(cleaned, session_id, on_stream=on_stream, history=history)
+            if on_transcript:
+                on_transcript(cleaned)
+            response, intent = self._process_text_input(
+                cleaned, session_id, on_stream=on_stream, on_action=on_action, history=history
+            )
             return {"transcript": cleaned, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
             return {

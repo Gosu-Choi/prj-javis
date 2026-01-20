@@ -35,8 +35,13 @@ if (action = "open_url") {
 
 if (action = "activate_window") {
     if (param != "") {
+        if WinActive(param) {
+            ExitApp
+        }
         WinRestore param
         WinActivate param
+        WinWaitActive param, , 1
+        WinMaximize param
     }
     ExitApp
 }

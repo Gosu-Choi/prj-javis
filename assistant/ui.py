@@ -2,6 +2,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
+import keyboard
+
 from core import Assistant
 
 
@@ -18,9 +20,16 @@ class AssistantUI:
         self.mode = tk.StringVar(value="voice")
         self._stream_active = {}
         self._stream_ui_active = False
+        self.voice_record_mode = tk.StringVar(value="auto")
+        self._recording = False
+        self._record_stop_event = None
+        self._hotkey_handles = {}
+        self._session_hotkeys_active = False
+        self._session_hotkey_resume_job = None
 
         self._build_ui()
         self._add_session()
+        self._register_hotkeys()
 
     def _build_ui(self):
         top = ttk.Frame(self.root)
@@ -33,6 +42,14 @@ class AssistantUI:
         ttk.Radiobutton(top, text="Text", variable=self.mode, value="text", command=self._render_mode).pack(
             side="left"
         )
+
+        ttk.Label(top, text="Record:").pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(
+            top, text="Auto", variable=self.voice_record_mode, value="auto", command=self._render_mode
+        ).pack(side="left", padx=4)
+        ttk.Radiobutton(
+            top, text="Manual", variable=self.voice_record_mode, value="manual", command=self._render_mode
+        ).pack(side="left")
 
         self.status = ttk.Label(top, text="Ready")
         self.status.pack(side="right")
@@ -80,9 +97,72 @@ class AssistantUI:
             self.send_button.configure(state="disabled")
             self.record_button.configure(state="normal")
         else:
+            if self._recording:
+                self._stop_manual_record()
             self.text_entry.configure(state="normal")
             self.send_button.configure(state="normal")
             self.record_button.configure(state="disabled")
+
+    def _register_hotkeys(self):
+        self._hotkey_handles["ctrl_l"] = keyboard.add_hotkey("ctrl+l", self._hotkey_toggle_record, suppress=True)
+        self._enable_session_hotkeys()
+
+    def _enable_session_hotkeys(self):
+        if self._session_hotkeys_active:
+            return
+        self._hotkey_handles["page_down"] = keyboard.add_hotkey(
+            "page down", self._hotkey_next_session, suppress=True
+        )
+        self._hotkey_handles["page_up"] = keyboard.add_hotkey("page up", self._hotkey_prev_session, suppress=True)
+        self._session_hotkeys_active = True
+
+    def _disable_session_hotkeys(self):
+        if not self._session_hotkeys_active:
+            return
+        if "page_down" in self._hotkey_handles:
+            keyboard.remove_hotkey(self._hotkey_handles["page_down"])
+        if "page_up" in self._hotkey_handles:
+            keyboard.remove_hotkey(self._hotkey_handles["page_up"])
+        self._session_hotkeys_active = False
+
+    def _hotkey_toggle_record(self):
+        self.root.after(0, self._toggle_record_from_hotkey)
+
+    def _hotkey_next_session(self):
+        self.root.after(0, self._move_session, 1)
+
+    def _hotkey_prev_session(self):
+        self.root.after(0, self._move_session, -1)
+
+    def _suspend_session_hotkeys(self, duration_ms: int = 300):
+        self._disable_session_hotkeys()
+        if self._session_hotkey_resume_job:
+            self.root.after_cancel(self._session_hotkey_resume_job)
+        self._session_hotkey_resume_job = self.root.after(duration_ms, self._enable_session_hotkeys)
+
+    def _toggle_record_from_hotkey(self):
+        if self.mode.get() != "voice":
+            self.mode.set("voice")
+            self._render_mode()
+        if self.voice_record_mode.get() != "manual":
+            self.voice_record_mode.set("manual")
+        if self._recording:
+            self._stop_manual_record()
+        else:
+            self._start_manual_record()
+
+    def _move_session(self, delta: int):
+        if not self.sessions:
+            return
+        if self.current_session not in self.sessions:
+            return
+        index = self.sessions.index(self.current_session)
+        new_index = (index + delta) % len(self.sessions)
+        self.session_list.select_clear(0, "end")
+        self.session_list.select_set(new_index)
+        self.current_session = self.sessions[new_index]
+        self._render_chat()
+        self._append_system(f"Switched to {self.current_session}", self.current_session)
 
     def _add_session(self):
         name = f"Session {len(self.sessions) + 1}"
@@ -193,26 +273,74 @@ class AssistantUI:
     def _record_voice(self):
         if self.mode.get() != "voice":
             return
-        self._run_async(self.assistant.handle_voice, show_user=True)
+        if self.voice_record_mode.get() == "manual":
+            if self._recording:
+                self._stop_manual_record()
+            else:
+                self._start_manual_record()
+        else:
+            self._run_async(self.assistant.handle_voice, show_user=True, record_mode="auto")
 
-    def _run_async(self, fn, *args, show_user: bool):
+    def _start_manual_record(self):
+        self._record_stop_event = threading.Event()
+        self._recording = True
+        self.record_button.configure(text="Stop")
+        self._run_async(
+            self.assistant.handle_voice,
+            show_user=True,
+            record_mode="manual",
+            stop_event=self._record_stop_event,
+        )
+
+    def _stop_manual_record(self):
+        if self._record_stop_event:
+            self._record_stop_event.set()
+        self._recording = False
+        self.record_button.configure(text="Record")
+
+    def _run_async(self, fn, *args, show_user: bool, **kwargs):
         session_id = self.current_session
         if not session_id:
             return
 
         def target():
             stream_state = {"used": False}
+            transcript_state = {"shown": False}
 
             def on_stream(delta: str):
                 stream_state["used"] = True
                 self.root.after(0, lambda: self._append_stream(session_id, delta))
 
+            def on_action(intent_type: str, command: str):
+                if intent_type == "zotero_command" and command in {"page_down", "page_up"}:
+                    self.root.after(0, lambda: self._suspend_session_hotkeys(300))
+
+            def on_transcript(text: str):
+                transcript_state["shown"] = True
+                self.root.after(0, lambda: self._append_chat("You", text, session_id))
+
             try:
                 self._ui_call(self._set_status, "Working...")
-                result = fn(session_id, on_stream=on_stream) if not args else fn(*args, session_id, on_stream=on_stream)
+                if not args:
+                    result = fn(
+                        session_id,
+                        on_stream=on_stream,
+                        on_action=on_action,
+                        on_transcript=on_transcript,
+                        **kwargs,
+                    )
+                else:
+                    result = fn(
+                        *args,
+                        session_id,
+                        on_stream=on_stream,
+                        on_action=on_action,
+                        on_transcript=on_transcript,
+                        **kwargs,
+                    )
                 transcript = result.get("transcript", "")
                 response = result.get("response", "")
-                if transcript and show_user:
+                if transcript and show_user and not transcript_state["shown"]:
                     self._ui_call(self._append_chat, "You", transcript, session_id)
                 if stream_state["used"]:
                     self._ui_call(self._end_stream, session_id)
@@ -222,6 +350,8 @@ class AssistantUI:
                 self._ui_call(self._append_system, f"Error: {exc}", session_id)
             finally:
                 self._ui_call(self._set_status, "Ready")
+                if self.voice_record_mode.get() == "manual" and self._recording:
+                    self._ui_call(self._stop_manual_record)
 
         threading.Thread(target=target, daemon=True).start()
 

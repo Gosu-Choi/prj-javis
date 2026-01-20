@@ -61,6 +61,12 @@ python assistant\ui.py
 ```
 
 Use the Mode toggle to switch between Voice and Text. Sessions keep separate conversational history.
+Use Record: Auto/Manual to control whether recording stops on silence or by clicking Stop.
+
+## Global hotkeys (UI)
+- Ctrl+L: toggle manual recording (start/stop)
+- Page Up / Page Down: switch sessions
+- Note: global hotkeys require the `keyboard` package and may need admin privileges on Windows.
 
 ## Streaming responses
 Set `STREAM_CHAT=1` in `.env` to stream responses in the UI as they are generated.
