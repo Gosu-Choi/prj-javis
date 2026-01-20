@@ -104,7 +104,9 @@ class AssistantUI:
             self.record_button.configure(state="disabled")
 
     def _register_hotkeys(self):
-        self._hotkey_handles["ctrl_l"] = keyboard.add_hotkey("ctrl+l", self._hotkey_toggle_record, suppress=True)
+        self._hotkey_handles["page_up_record"] = keyboard.add_hotkey(
+            "page up", self._hotkey_toggle_record, suppress=True
+        )
         self._enable_session_hotkeys()
 
     def _enable_session_hotkeys(self):
@@ -113,7 +115,6 @@ class AssistantUI:
         self._hotkey_handles["page_down"] = keyboard.add_hotkey(
             "page down", self._hotkey_next_session, suppress=True
         )
-        self._hotkey_handles["page_up"] = keyboard.add_hotkey("page up", self._hotkey_prev_session, suppress=True)
         self._session_hotkeys_active = True
 
     def _disable_session_hotkeys(self):
@@ -121,8 +122,6 @@ class AssistantUI:
             return
         if "page_down" in self._hotkey_handles:
             keyboard.remove_hotkey(self._hotkey_handles["page_down"])
-        if "page_up" in self._hotkey_handles:
-            keyboard.remove_hotkey(self._hotkey_handles["page_up"])
         self._session_hotkeys_active = False
 
     def _hotkey_toggle_record(self):
