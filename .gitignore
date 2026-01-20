@@ -1,2 +1,4 @@
 .env
 config.example.env
+log/
+screenshots/

@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 import queue
@@ -12,6 +14,8 @@ from urllib.parse import quote_plus
 import numpy as np
 import requests
 import sounddevice as sd
+from mss import mss
+from PIL import Image
 
 from prompts import (
     CHAT_SYSTEM,
@@ -45,12 +49,17 @@ API_KEY = os.environ.get("OPENAI_API_KEY")
 STT_MODEL = os.environ.get("STT_MODEL", "gpt-4o-mini-transcribe")
 INTENT_MODEL = os.environ.get("INTENT_MODEL", "gpt-4o-mini")
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
+VISION_MODEL = os.environ.get("VISION_MODEL", "")
 POSTPROCESS_MODEL = os.environ.get("POSTPROCESS_MODEL", "gpt-4o-mini")
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "20"))
 STREAM_CHAT = os.environ.get("STREAM_CHAT", "0") == "1"
 STREAM_READ_TIMEOUT = float(os.environ.get("STREAM_READ_TIMEOUT", "5"))
 STREAM_IDLE_TIMEOUT = float(os.environ.get("STREAM_IDLE_TIMEOUT", "2"))
 VOICE_RECORD_MODE = os.environ.get("VOICE_RECORD_MODE", "auto").lower()
+SCREENSHOT_ENABLED = os.environ.get("SCREENSHOT_ENABLED", "0") == "1"
+SCREENSHOT_MAX_WIDTH = int(os.environ.get("SCREENSHOT_MAX_WIDTH", "1000"))
+SCREENSHOT_LOG_DIR = os.environ.get("SCREENSHOT_LOG_DIR", "log")
+SCREENSHOT_DEBUG = os.environ.get("SCREENSHOT_DEBUG", "0") == "1"
 
 ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
@@ -367,14 +376,57 @@ def _run_ahk(action: str, param: str | None = None) -> None:
     subprocess.run(args, check=False)
 
 
-def _respond_chat(text: str, history: list, on_stream=None) -> str:
+def _capture_fullscreen_png_data_url() -> str:
+    with mss() as sct:
+        monitor = sct.monitors[0]
+        shot = sct.grab(monitor)
+        img = Image.frombytes("RGB", shot.size, shot.rgb)
+    if SCREENSHOT_MAX_WIDTH > 0 and img.width > SCREENSHOT_MAX_WIDTH:
+        ratio = SCREENSHOT_MAX_WIDTH / float(img.width)
+        new_size = (SCREENSHOT_MAX_WIDTH, int(img.height * ratio))
+        img = img.resize(new_size, Image.BICUBIC)
+    _write_screenshot_log(img)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    if SCREENSHOT_DEBUG:
+        print(f"[screenshot] captured {img.width}x{img.height} bytes={len(encoded)}", file=sys.stderr)
+    return f"data:image/png;base64,{encoded}"
+
+
+def _write_screenshot_log(img: Image.Image) -> None:
+    try:
+        log_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", SCREENSHOT_LOG_DIR))
+        os.makedirs(log_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(log_dir, f"screenshot-{ts}.png")
+        img.save(path, format="PNG")
+    except OSError:
+        pass
+
+
+def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str | None = None) -> str:
     _require_api_key()
     messages = [{"role": "system", "content": CHAT_SYSTEM}]
+    if image_data_url:
+        messages.append({"role": "system", "content": "A screenshot image is provided by the user message."})
     if history:
         messages.extend(history[-6:])
-    messages.append({"role": "user", "content": CHAT_USER_TEMPLATE.format(text=text)})
+    if image_data_url:
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": CHAT_USER_TEMPLATE.format(text=text)},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            }
+        )
+    else:
+        messages.append({"role": "user", "content": CHAT_USER_TEMPLATE.format(text=text)})
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    body = {"model": CHAT_MODEL, "messages": messages, "temperature": 0.3}
+    model = VISION_MODEL if image_data_url and VISION_MODEL else CHAT_MODEL
+    body = {"model": model, "messages": messages, "temperature": 0.3}
 
     if STREAM_CHAT and on_stream is not None:
         body["stream"] = True
@@ -553,9 +605,15 @@ class Assistant:
             self.last_search[session_id] = query
 
         else:
-            if APP_WINDOW_TITLE:
-                _run_ahk("activate_window", APP_WINDOW_TITLE)
-            response = _respond_chat(transcript, history, on_stream=on_stream)
+            image_data_url = None
+            if SCREENSHOT_ENABLED:
+                try:
+                    image_data_url = _capture_fullscreen_png_data_url()
+                except Exception as exc:
+                    if SCREENSHOT_DEBUG:
+                        print(f"[screenshot_error] {exc.__class__.__name__}: {exc}", file=sys.stderr)
+                    image_data_url = None
+            response = _respond_chat(transcript, history, on_stream=on_stream, image_data_url=image_data_url)
             history.append({"role": "user", "content": transcript})
             history.append({"role": "assistant", "content": response})
 
@@ -571,6 +629,7 @@ class Assistant:
             response, intent = self._process_text_input(text, session_id, on_stream=on_stream, on_action=on_action)
             return {"transcript": text, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
+            print(f"[api_error] {exc.__class__.__name__}: {exc}", file=sys.stderr)
             return {
                 "transcript": text,
                 "response": f"Network error contacting API: {exc.__class__.__name__}",
@@ -609,6 +668,7 @@ class Assistant:
             )
             return {"transcript": cleaned, "response": response, "intent": intent}
         except requests.exceptions.RequestException as exc:
+            print(f"[api_error] {exc.__class__.__name__}: {exc}", file=sys.stderr)
             return {
                 "transcript": "",
                 "response": f"Network error contacting API: {exc.__class__.__name__}",

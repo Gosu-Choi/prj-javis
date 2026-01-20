@@ -73,6 +73,13 @@ Set `STREAM_CHAT=1` in `.env` to stream responses in the UI as they are generate
 If the stream stalls, lower `STREAM_READ_TIMEOUT` (default 5 seconds).
 If the server keeps the stream open after the last token, lower `STREAM_IDLE_TIMEOUT` (default 2 seconds).
 
+## Screenshot context (chat only)
+If `SCREENSHOT_ENABLED=1`, the assistant captures a full-screen screenshot and sends it
+along with the user message for chat responses.
+Set `SCREENSHOT_MAX_WIDTH` (default 1000) to downscale screenshots and reduce cost.
+Set `SCREENSHOT_LOG_DIR` to save screenshots for debugging (default `log`).
+Set `VISION_MODEL` to a vision-capable model (e.g., `gpt-4o`) if your chat model cannot see images.
+
 ## Notes
 - Zotero must already be focused for page up/down/find to work.
 - Chrome must be installed and accessible as `chrome.exe`.

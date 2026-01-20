@@ -46,6 +46,18 @@ if (action = "activate_window") {
     ExitApp
 }
 
+if (action = "activate_window_no_resize") {
+    if (param != "") {
+        if WinActive(param) {
+            ExitApp
+        }
+        WinRestore param
+        WinActivate param
+        WinWaitActive param, , 1
+    }
+    ExitApp
+}
+
 if (action = "zotero_library") {
     Send "^1"
     ExitApp

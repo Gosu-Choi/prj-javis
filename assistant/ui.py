@@ -113,7 +113,7 @@ class AssistantUI:
         if self._session_hotkeys_active:
             return
         self._hotkey_handles["page_down"] = keyboard.add_hotkey(
-            "page down", self._hotkey_next_session, suppress=True
+            "page down", self._hotkey_alt_tab, suppress=True
         )
         self._session_hotkeys_active = True
 
@@ -132,6 +132,9 @@ class AssistantUI:
 
     def _hotkey_prev_session(self):
         self.root.after(0, self._move_session, -1)
+
+    def _hotkey_alt_tab(self):
+        keyboard.send("alt+tab")
 
     def _suspend_session_hotkeys(self, duration_ms: int = 300):
         self._disable_session_hotkeys()
