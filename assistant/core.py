@@ -613,6 +613,8 @@ class Assistant:
                     if SCREENSHOT_DEBUG:
                         print(f"[screenshot_error] {exc.__class__.__name__}: {exc}", file=sys.stderr)
                     image_data_url = None
+            if APP_WINDOW_TITLE:
+                _run_ahk("activate_window_no_resize", APP_WINDOW_TITLE)
             response = _respond_chat(transcript, history, on_stream=on_stream, image_data_url=image_data_url)
             history.append({"role": "user", "content": transcript})
             history.append({"role": "assistant", "content": response})
