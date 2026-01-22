@@ -4,7 +4,7 @@ from tkinter import ttk
 
 import keyboard
 
-from core import Assistant
+from core import Assistant, stop_tts
 
 
 class AssistantUI:
@@ -30,6 +30,7 @@ class AssistantUI:
         self._build_ui()
         self._add_session()
         self._register_hotkeys()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
         top = ttk.Frame(self.root)
@@ -135,6 +136,10 @@ class AssistantUI:
 
     def _hotkey_alt_tab(self):
         keyboard.send("alt+tab")
+
+    def _on_close(self):
+        stop_tts()
+        self.root.destroy()
 
     def _suspend_session_hotkeys(self, duration_ms: int = 300):
         self._disable_session_hotkeys()

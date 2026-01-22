@@ -1,3 +1,4 @@
+import atexit
 import base64
 import io
 import json
@@ -63,6 +64,8 @@ SCREENSHOT_DEBUG = os.environ.get("SCREENSHOT_DEBUG", "0") == "1"
 
 ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
+TTS_VOICE = os.environ.get("TTS_VOICE", "")
+TTS_RATE = int(os.environ.get("TTS_RATE", "0"))
 
 SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
 INPUT_DEVICE = os.environ.get("INPUT_DEVICE")
@@ -472,18 +475,47 @@ def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str 
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
+_tts_proc: subprocess.Popen | None = None
+
+
+def _stop_tts() -> None:
+    global _tts_proc
+    if _tts_proc and _tts_proc.poll() is None:
+        try:
+            _tts_proc.terminate()
+        except OSError:
+            pass
+    _tts_proc = None
+
+
 def _speak(text: str) -> None:
     if not ENABLE_TTS or not text:
         return
+    _stop_tts()
     ps = (
         "Add-Type -AssemblyName System.Speech;"
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-        "$s.Rate = 0;"
+        "if ($env:TTS_VOICE) {"
+        "  $voice = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo } |"
+        "    Where-Object { $_.Name -like \"*$env:TTS_VOICE*\" } | Select-Object -First 1;"
+        "  if ($voice) { $s.SelectVoice($voice.Name) }"
+        "}"
+        "$s.Rate = [int]$env:TTS_RATE;"
         "$s.Speak($env:TTS_TEXT);"
     )
     env = os.environ.copy()
     env["TTS_TEXT"] = text
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], env=env, check=False)
+    env["TTS_VOICE"] = TTS_VOICE
+    env["TTS_RATE"] = str(TTS_RATE)
+    global _tts_proc
+    _tts_proc = subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], env=env)
+
+
+def stop_tts() -> None:
+    _stop_tts()
+
+
+atexit.register(_stop_tts)
 
 
 class Assistant:

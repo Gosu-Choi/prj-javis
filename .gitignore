@@ -2,3 +2,5 @@
 config.example.env
 log/
 screenshots/
+assistant/__pycache__/
+assistant/last_utterance.wav
