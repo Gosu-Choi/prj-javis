@@ -58,7 +58,7 @@ STREAM_CHAT = os.environ.get("STREAM_CHAT", "0") == "1"
 STREAM_READ_TIMEOUT = float(os.environ.get("STREAM_READ_TIMEOUT", "5"))
 STREAM_IDLE_TIMEOUT = float(os.environ.get("STREAM_IDLE_TIMEOUT", "2"))
 VOICE_RECORD_MODE = os.environ.get("VOICE_RECORD_MODE", "auto").lower()
-SCREENSHOT_ENABLED = os.environ.get("SCREENSHOT_ENABLED", "0") == "1"
+SCREENSHOT_ENABLED_DEFAULT = os.environ.get("SCREENSHOT_ENABLED", "0") == "1"
 SCREENSHOT_MAX_WIDTH = int(os.environ.get("SCREENSHOT_MAX_WIDTH", "1000"))
 SCREENSHOT_LOG_DIR = os.environ.get("SCREENSHOT_LOG_DIR", "log")
 SCREENSHOT_DEBUG = os.environ.get("SCREENSHOT_DEBUG", "0") == "1"
@@ -331,8 +331,10 @@ def _split_words_buffer(text: str) -> tuple[list[str], str]:
     parts = text.split()
     if not parts:
         return [], text
-    # If the text doesn't end with whitespace, keep the last partial word in the buffer.
-    if text[-1].isspace():
+    last_char = text[-1]
+    if last_char.isspace():
+        return parts, ""
+    if last_char in ".?!,:;":
         return parts, ""
     if len(parts) == 1:
         return [], text
@@ -665,6 +667,10 @@ class Assistant:
         self.histories = {}
         self.last_search = {}
         self.last_actions = {}
+        self.screenshot_enabled = SCREENSHOT_ENABLED_DEFAULT
+
+    def set_screenshot_enabled(self, enabled: bool) -> None:
+        self.screenshot_enabled = bool(enabled)
 
     def _apply_intent_overrides(self, text: str, intent: dict | None) -> dict:
         intent = intent or {"intent": "chat"}
@@ -822,7 +828,7 @@ class Assistant:
 
         else:
             image_data_url = None
-            if SCREENSHOT_ENABLED:
+            if self.screenshot_enabled:
                 try:
                     image_data_url = _capture_fullscreen_png_data_url()
                 except Exception as exc:

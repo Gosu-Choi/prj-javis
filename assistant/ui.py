@@ -22,6 +22,7 @@ class AssistantUI:
         self._stream_active = {}
         self._stream_ui_active = False
         self.voice_record_mode = tk.StringVar(value="auto")
+        self.screenshot_var = tk.BooleanVar(value=self.assistant.screenshot_enabled)
         self._recording = False
         self._record_stop_event = None
         self._hotkey_handles = {}
@@ -43,6 +44,9 @@ class AssistantUI:
         )
         ttk.Radiobutton(top, text="Text", variable=self.mode, value="text", command=self._render_mode).pack(
             side="left"
+        )
+        ttk.Checkbutton(top, text="Screenshots", variable=self.screenshot_var, command=self._toggle_screenshot).pack(
+            side="left", padx=(10, 0)
         )
 
         ttk.Label(top, text="Record:").pack(side="left", padx=(16, 0))
@@ -108,6 +112,11 @@ class AssistantUI:
             self.text_entry.configure(state="normal")
             self.send_button.configure(state="normal")
             self.record_button.configure(state="disabled")
+
+    def _toggle_screenshot(self):
+        enabled = bool(self.screenshot_var.get())
+        self.assistant.set_screenshot_enabled(enabled)
+        self._append_system(f"Screenshots {'enabled' if enabled else 'disabled'}")
 
     def _register_hotkeys(self):
         self._hotkey_handles["page_up_record"] = keyboard.add_hotkey(
