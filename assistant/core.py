@@ -10,6 +10,7 @@ import sys
 import time
 import wave
 from collections import deque
+import threading
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -66,6 +67,9 @@ ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
 TTS_VOICE = os.environ.get("TTS_VOICE", "")
 TTS_RATE = int(os.environ.get("TTS_RATE", "0"))
+TTS_STREAMING = os.environ.get("TTS_STREAMING", "0") == "1"
+TTS_STREAM_START_WORDS = int(os.environ.get("TTS_STREAM_START_WORDS", "1"))
+TTS_STREAM_COALESCE_MS = int(os.environ.get("TTS_STREAM_COALESCE_MS", "200"))
 
 SAMPLE_RATE = int(os.environ.get("SAMPLE_RATE", "16000"))
 INPUT_DEVICE = os.environ.get("INPUT_DEVICE")
@@ -306,6 +310,32 @@ def _parse_tab_number(text: str) -> int | None:
     return None
 
 
+def _split_complete_sentences(text: str) -> tuple[list[str], str]:
+    sentences = []
+    start = 0
+    for idx, ch in enumerate(text):
+        if ch in ".?!\n":
+            chunk = text[start : idx + 1]
+            sentences.append(chunk)
+            start = idx + 1
+    remainder = text[start:]
+    return sentences, remainder
+
+
+def _split_words_buffer(text: str) -> tuple[list[str], str]:
+    if not text:
+        return [], ""
+    parts = text.split()
+    if not parts:
+        return [], text
+    # If the text doesn't end with whitespace, keep the last partial word in the buffer.
+    if text[-1].isspace():
+        return parts, ""
+    if len(parts) == 1:
+        return [], text
+    return parts[:-1], parts[-1]
+
+
 def _parse_tab_number(text: str) -> int | None:
     lowered = text.lower()
     word_map = {
@@ -409,6 +439,15 @@ def _write_screenshot_log(img: Image.Image) -> None:
 
 
 def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str | None = None) -> str:
+    global _tts_streamed_last
+    global _tts_stream_id
+    global _tts_stream_buffer
+    _stop_tts()
+    _tts_streamed_last = False
+    _tts_stream_id += 1
+    current_stream_id = _tts_stream_id
+    with _tts_stream_lock:
+        _tts_stream_buffer = ""
     _require_api_key()
     messages = [{"role": "system", "content": CHAT_SYSTEM}]
     if image_data_url:
@@ -442,6 +481,9 @@ def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str 
         )
         resp.raise_for_status()
         full = []
+        tts_buffer = ""
+        tts_words: list[str] = []
+        tts_started = False
         last_delta_time = time.time()
         try:
             for raw in resp.iter_lines(decode_unicode=True):
@@ -464,10 +506,33 @@ def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str 
                     last_delta_time = time.time()
                     full.append(delta)
                     on_stream(delta)
+                    if ENABLE_TTS and TTS_STREAMING:
+                        tts_buffer += delta
+                        new_words, remainder = _split_words_buffer(tts_buffer)
+                        if new_words:
+                            tts_words.extend(new_words)
+                            if not tts_started and len(tts_words) >= TTS_STREAM_START_WORDS:
+                                tts_started = True
+                            if tts_started and tts_words:
+                                _enqueue_tts_stream(" ".join(tts_words), current_stream_id)
+                                tts_words = []
+                        tts_buffer = remainder
         except requests.exceptions.ReadTimeout:
             if full:
+                if ENABLE_TTS and TTS_STREAMING:
+                    if tts_buffer.strip():
+                        tts_words.extend(tts_buffer.split())
+                    if tts_words:
+                        _enqueue_tts_stream(" ".join(tts_words), current_stream_id)
+                _tts_streamed_last = ENABLE_TTS and TTS_STREAMING
                 return "".join(full).strip()
             raise
+        if ENABLE_TTS and TTS_STREAMING:
+            if tts_buffer.strip():
+                tts_words.extend(tts_buffer.split())
+            if tts_words:
+                _enqueue_tts_stream(" ".join(tts_words), current_stream_id)
+        _tts_streamed_last = ENABLE_TTS and TTS_STREAMING
         return "".join(full).strip()
 
     resp = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=body, timeout=REQUEST_TIMEOUT)
@@ -476,6 +541,38 @@ def _respond_chat(text: str, history: list, on_stream=None, image_data_url: str 
 
 
 _tts_proc: subprocess.Popen | None = None
+_tts_queue: queue.Queue[str] | None = None
+_tts_thread: threading.Thread | None = None
+_tts_streamed_last = False
+_tts_stream_buffer = ""
+_tts_stream_id = 0
+_tts_stream_lock = threading.Lock()
+
+
+def _ensure_tts_worker() -> None:
+    global _tts_queue, _tts_thread
+    if _tts_queue is None:
+        _tts_queue = queue.Queue()
+    if _tts_thread is None or not _tts_thread.is_alive():
+        _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
+        _tts_thread.start()
+
+
+def _tts_worker() -> None:
+    global _tts_stream_buffer
+    if _tts_queue is None:
+        return
+    while True:
+        text = None
+        with _tts_stream_lock:
+            if _tts_stream_buffer:
+                text = _tts_stream_buffer
+                _tts_stream_buffer = ""
+        if text is None:
+            text = _tts_queue.get()
+        if text is None:
+            break
+        _run_tts(text)
 
 
 def _stop_tts() -> None:
@@ -486,12 +583,47 @@ def _stop_tts() -> None:
         except OSError:
             pass
     _tts_proc = None
+    if _tts_queue is not None:
+        while not _tts_queue.empty():
+            try:
+                _tts_queue.get_nowait()
+            except queue.Empty:
+                break
+    global _tts_stream_buffer
+    with _tts_stream_lock:
+        _tts_stream_buffer = ""
 
 
-def _speak(text: str) -> None:
+def _enqueue_tts(text: str, interrupt: bool = False) -> None:
     if not ENABLE_TTS or not text:
         return
-    _stop_tts()
+    if interrupt:
+        _stop_tts()
+    _ensure_tts_worker()
+    if _tts_queue is not None:
+        _tts_queue.put(text)
+
+
+def _enqueue_tts_stream(text: str, stream_id: int) -> None:
+    global _tts_stream_buffer
+    if not ENABLE_TTS or not text:
+        return
+    if stream_id != _tts_stream_id:
+        return
+    with _tts_stream_lock:
+        _tts_stream_buffer = (_tts_stream_buffer + " " + text).strip() if _tts_stream_buffer else text.strip()
+        buffer_text = _tts_stream_buffer
+        if not _tts_proc or _tts_proc.poll() is not None:
+            _tts_stream_buffer = ""
+        else:
+            buffer_text = ""
+    if buffer_text:
+        _enqueue_tts(buffer_text, interrupt=False)
+
+
+def _run_tts(text: str) -> None:
+    if not ENABLE_TTS or not text:
+        return
     ps = (
         "Add-Type -AssemblyName System.Speech;"
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
@@ -509,6 +641,11 @@ def _speak(text: str) -> None:
     env["TTS_RATE"] = str(TTS_RATE)
     global _tts_proc
     _tts_proc = subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], env=env)
+    _tts_proc.wait()
+
+
+def _speak(text: str) -> None:
+    _enqueue_tts(text, interrupt=True)
 
 
 def stop_tts() -> None:
@@ -655,7 +792,8 @@ class Assistant:
             history.append({"role": "user", "content": transcript})
             history.append({"role": "assistant", "content": response})
 
-        _speak(response)
+        if not _tts_streamed_last:
+            _speak(response)
         return response
 
     def handle_text(self, text: str, session_id: str, on_stream=None, on_action=None, on_transcript=None) -> dict:

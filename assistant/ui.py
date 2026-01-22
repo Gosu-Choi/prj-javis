@@ -286,12 +286,14 @@ class AssistantUI:
             else:
                 self._start_manual_record()
         else:
+            stop_tts()
             self._run_async(self.assistant.handle_voice, show_user=True, record_mode="auto")
 
     def _start_manual_record(self):
         self._record_stop_event = threading.Event()
         self._recording = True
         self.record_button.configure(text="Stop")
+        stop_tts()
         self._run_async(
             self.assistant.handle_voice,
             show_user=True,

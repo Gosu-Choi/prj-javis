@@ -84,6 +84,9 @@ Set `VISION_MODEL` to a vision-capable model (e.g., `gpt-4o`) if your chat model
 - Zotero must already be focused for page up/down/find to work.
 - Chrome must be installed and accessible as `chrome.exe`.
 - If you want spoken output, set `ENABLE_TTS=1`.
-- To force an English voice, set `TTS_VOICE` (partial name match), e.g. `TTS_VOICE=Zira`.
+ - To force an English voice, set `TTS_VOICE` (partial name match), e.g. `TTS_VOICE=Zira`.
  - To speed up or slow down speech, set `TTS_RATE` (range -10 to 10).
+ - For streaming speech while text is generating, set `TTS_STREAMING=1` and tune:
+   - `TTS_STREAM_START_WORDS` (default 1) to begin after N words are buffered
+ - To reduce gaps between spoken chunks, set `TTS_STREAM_COALESCE_MS` (default 200ms).
  - To bring the UI to front on chat responses, set `APP_WINDOW_TITLE` to the window title.
