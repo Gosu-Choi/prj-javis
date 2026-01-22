@@ -62,6 +62,7 @@ SCREENSHOT_ENABLED = os.environ.get("SCREENSHOT_ENABLED", "0") == "1"
 SCREENSHOT_MAX_WIDTH = int(os.environ.get("SCREENSHOT_MAX_WIDTH", "1000"))
 SCREENSHOT_LOG_DIR = os.environ.get("SCREENSHOT_LOG_DIR", "log")
 SCREENSHOT_DEBUG = os.environ.get("SCREENSHOT_DEBUG", "0") == "1"
+SHORT_AUDIO_REPEAT_SECONDS = float(os.environ.get("SHORT_AUDIO_REPEAT_SECONDS", "2"))
 
 ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
@@ -91,7 +92,7 @@ def _require_api_key():
         raise RuntimeError("OPENAI_API_KEY is not set.")
 
 
-def _record_utterance_auto() -> str:
+def _record_utterance_auto() -> tuple[str, float]:
     block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
     max_blocks = int(MAX_RECORD_SECONDS / BLOCK_SECONDS)
     silence_blocks = int(SILENCE_SECONDS / BLOCK_SECONDS)
@@ -139,7 +140,7 @@ def _record_utterance_auto() -> str:
             if silence_count >= silence_blocks or len(chunks) >= max_blocks:
                 break
 
-    audio = np.concatenate(chunks, axis=0)
+    audio = np.concatenate(chunks, axis=0) if chunks else np.zeros((0, 1), dtype="float32")
     audio = np.clip(audio, -1.0, 1.0)
 
     wav_path = os.path.join(os.path.dirname(__file__), "last_utterance.wav")
@@ -149,10 +150,11 @@ def _record_utterance_auto() -> str:
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes((audio * 32767).astype(np.int16).tobytes())
 
-    return wav_path
+    duration = float(len(audio) / SAMPLE_RATE) if len(audio) else 0.0
+    return wav_path, duration
 
 
-def _record_utterance_manual(stop_event: "threading.Event") -> str:
+def _record_utterance_manual(stop_event: "threading.Event") -> tuple[str, float]:
     block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
     max_blocks = int(MAX_RECORD_SECONDS / BLOCK_SECONDS)
 
@@ -181,7 +183,7 @@ def _record_utterance_manual(stop_event: "threading.Event") -> str:
             chunks.append(block)
 
     if not chunks:
-        return ""
+        return "", 0.0
 
     audio = np.concatenate(chunks, axis=0)
     audio = np.clip(audio, -1.0, 1.0)
@@ -193,7 +195,8 @@ def _record_utterance_manual(stop_event: "threading.Event") -> str:
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes((audio * 32767).astype(np.int16).tobytes())
 
-    return wav_path
+    duration = float(len(audio) / SAMPLE_RATE) if len(audio) else 0.0
+    return wav_path, duration
 
 
 def _build_stt_prompt(history: list | None = None) -> str:
@@ -661,6 +664,7 @@ class Assistant:
             raise RuntimeError(f"AHK script not found: {AHK_SCRIPT}")
         self.histories = {}
         self.last_search = {}
+        self.last_actions = {}
 
     def _apply_intent_overrides(self, text: str, intent: dict | None) -> dict:
         intent = intent or {"intent": "chat"}
@@ -698,10 +702,48 @@ class Assistant:
         response = self._dispatch(intent, text, history, session_id, on_stream=on_stream, on_action=on_action)
         return response, intent
 
+    def _remember_action(self, session_id: str, intent: dict, transcript: str, response: str) -> None:
+        if not intent:
+            return
+        self.last_actions[session_id] = {
+            "intent": dict(intent),
+            "transcript": transcript,
+            "response": response,
+        }
+
+    def _handle_short_audio(self, session_id: str, history: list, on_action=None) -> dict | None:
+        last = self.last_actions.get(session_id)
+        if not last:
+            return None
+        intent = last.get("intent") or {}
+        if intent.get("intent", "chat") == "chat":
+            history.append({"role": "assistant", "content": "[ignored]"})
+            return {"transcript": "", "response": "[ignored]", "intent": intent}
+        transcript = last.get("transcript", "")
+        response = self._dispatch(
+            intent,
+            transcript or "[repeat]",
+            history,
+            session_id,
+            on_stream=None,
+            on_action=on_action,
+            record_history=False,
+        )
+        return {"transcript": "", "response": response, "intent": intent}
+
     def _dispatch(
-        self, intent: dict, transcript: str, history: list, session_id: str, on_stream=None, on_action=None
+        self,
+        intent: dict,
+        transcript: str,
+        history: list,
+        session_id: str,
+        on_stream=None,
+        on_action=None,
+        record_history: bool = True,
     ) -> str:
+        intent = intent or {"intent": "chat"}
         intent_type = intent.get("intent", "chat")
+        saved_intent = dict(intent)
 
         if intent_type == "zotero_command":
             command = intent.get("command", "")
@@ -713,6 +755,9 @@ class Assistant:
             lowered = transcript.lower()
             if "go to library" in lowered or "goto library" in lowered:
                 command = "library"
+            saved_intent["command"] = command
+            if query:
+                saved_intent["query"] = query
             if command in {"page_down", "page_up", "find"}:
                 _run_ahk("activate_window", "Zotero")
                 if command == "find" and query:
@@ -765,6 +810,8 @@ class Assistant:
                 query = self.last_search[session_id]
             if not query:
                 query = transcript
+            saved_intent["engine"] = engine
+            saved_intent["query"] = query
             if engine == "scholar":
                 url = "https://scholar.google.com/scholar?q=" + quote_plus(query)
             else:
@@ -785,15 +832,17 @@ class Assistant:
             if APP_WINDOW_TITLE:
                 _run_ahk("activate_window_no_resize", APP_WINDOW_TITLE)
             response = _respond_chat(transcript, history, on_stream=on_stream, image_data_url=image_data_url)
-            history.append({"role": "user", "content": transcript})
-            history.append({"role": "assistant", "content": response})
+            if record_history:
+                history.append({"role": "user", "content": transcript})
+                history.append({"role": "assistant", "content": response})
 
-        if intent_type != "chat":
+        if intent_type != "chat" and record_history:
             history.append({"role": "user", "content": transcript})
             history.append({"role": "assistant", "content": response})
 
         if not _tts_streamed_last:
             _speak(response)
+        self._remember_action(session_id, saved_intent, transcript, response)
         return response
 
     def handle_text(self, text: str, session_id: str, on_stream=None, on_action=None, on_transcript=None) -> dict:
@@ -824,11 +873,15 @@ class Assistant:
             if mode == "manual":
                 if stop_event is None:
                     return {"transcript": "", "response": "Manual record needs a stop signal.", "intent": {"intent": "chat"}}
-                wav_path = _record_utterance_manual(stop_event)
+                wav_path, record_duration = _record_utterance_manual(stop_event)
             else:
-                wav_path = _record_utterance_auto()
+                wav_path, record_duration = _record_utterance_auto()
             if not wav_path:
                 return {"transcript": "", "response": "Heard nothing. Try again.", "intent": {"intent": "chat"}}
+            if record_duration < SHORT_AUDIO_REPEAT_SECONDS:
+                short_result = self._handle_short_audio(session_id, history, on_action=on_action)
+                if short_result is not None:
+                    return short_result
             transcript = _stt_transcribe(wav_path, prompt=stt_prompt)
             cleaned = _postprocess_transcript(transcript)
             if not cleaned:

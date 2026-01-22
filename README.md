@@ -88,5 +88,6 @@ Set `VISION_MODEL` to a vision-capable model (e.g., `gpt-4o`) if your chat model
  - To speed up or slow down speech, set `TTS_RATE` (range -10 to 10).
  - For streaming speech while text is generating, set `TTS_STREAMING=1` and tune:
    - `TTS_STREAM_START_WORDS` (default 1) to begin after N words are buffered
- - To reduce gaps between spoken chunks, set `TTS_STREAM_COALESCE_MS` (default 200ms).
- - To bring the UI to front on chat responses, set `APP_WINDOW_TITLE` to the window title.
+- To reduce gaps between spoken chunks, set `TTS_STREAM_COALESCE_MS` (default 200ms).
+- To bring the UI to front on chat responses, set `APP_WINDOW_TITLE` to the window title.
+- Set `SHORT_AUDIO_REPEAT_SECONDS` (default 2). Voice taps shorter than this repeat the previous non-chat action without another GPT call; if the last intent was chat, the assistant logs `[ignored]` instead.
