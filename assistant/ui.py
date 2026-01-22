@@ -1,5 +1,6 @@
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 import keyboard
@@ -28,7 +29,7 @@ class AssistantUI:
         self._session_hotkey_resume_job = None
 
         self._build_ui()
-        self._add_session()
+        self._add_session(announce=False)
         self._register_hotkeys()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -75,6 +76,10 @@ class AssistantUI:
         self.chat = tk.Text(right, wrap="word", height=20)
         self.chat.pack(fill="both", expand=True)
         self.chat.configure(state="disabled")
+        base_font = tkfont.nametofont(self.chat.cget("font"))
+        self._speaker_font = base_font.copy()
+        self._speaker_font.configure(weight="bold")
+        self.chat.tag_configure("speaker_label", font=self._speaker_font)
 
         self.input_frame = ttk.Frame(right)
         self.input_frame.pack(fill="x", pady=8)
@@ -171,7 +176,7 @@ class AssistantUI:
         self._render_chat()
         self._append_system(f"Switched to {self.current_session}", self.current_session)
 
-    def _add_session(self):
+    def _add_session(self, announce: bool = True):
         name = f"Session {len(self.sessions) + 1}"
         self.sessions.append(name)
         self.chat_logs[name] = []
@@ -181,7 +186,8 @@ class AssistantUI:
         self.session_list.select_set("end")
         self.current_session = name
         self._render_chat()
-        self._append_system(f"Switched to {name}", name)
+        if announce:
+            self._append_system(f"Switched to {name}", name)
 
     def _on_session_select(self, event):
         selection = self.session_list.curselection()
@@ -225,7 +231,7 @@ class AssistantUI:
         if session_id != self.current_session:
             return
         self.chat.configure(state="normal")
-        self.chat.insert("end", f"{role}: {text}\n")
+        self._write_chat_line(role, text)
         self.chat.see("end")
         self.chat.configure(state="disabled")
 
@@ -253,12 +259,19 @@ class AssistantUI:
                 if role == "System":
                     self.chat.insert("end", f"[{text}]\n")
                 elif stream_active and is_last and role == "Assistant":
-                    self.chat.insert("end", f"{role}: {text}")
+                    self._write_chat_line(role, text, trailing="")
                 else:
-                    self.chat.insert("end", f"{role}: {text}\n")
+                    self._write_chat_line(role, text)
         self.chat.see("end")
         self.chat.configure(state="disabled")
         self._stream_ui_active = bool(self.current_session and self._stream_active.get(self.current_session))
+
+    def _write_chat_line(self, role: str, text: str, trailing: str = "\n\n"):
+        if role in {"You", "Assistant"}:
+            self.chat.insert("end", f"{role}: ", "speaker_label")
+            self.chat.insert("end", f"{text}{trailing}")
+        else:
+            self.chat.insert("end", f"{role}: {text}{trailing}")
 
     def _set_status(self, text):
         self.status.configure(text=text)
@@ -381,7 +394,7 @@ class AssistantUI:
         self.chat.configure(state="normal")
         if not self._stream_ui_active:
             self._stream_ui_active = True
-            self.chat.insert("end", "Assistant: ")
+            self.chat.insert("end", "Assistant: ", "speaker_label")
         self.chat.insert("end", delta)
         self.chat.see("end")
         self.chat.configure(state="disabled")
@@ -393,7 +406,7 @@ class AssistantUI:
         if session_id != self.current_session:
             return
         self.chat.configure(state="normal")
-        self.chat.insert("end", "\n")
+        self.chat.insert("end", "\n\n")
         self.chat.see("end")
         self.chat.configure(state="disabled")
         self._stream_ui_active = False

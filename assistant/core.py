@@ -840,6 +840,7 @@ class Assistant:
             history.append({"role": "user", "content": transcript})
             history.append({"role": "assistant", "content": response})
 
+        response = response.replace("\n\n", "\n")
         if not _tts_streamed_last:
             _speak(response)
         self._remember_action(session_id, saved_intent, transcript, response)
