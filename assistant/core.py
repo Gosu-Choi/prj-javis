@@ -675,6 +675,22 @@ class Assistant:
     def _apply_intent_overrides(self, text: str, intent: dict | None) -> dict:
         intent = intent or {"intent": "chat"}
         lowered = text.lower()
+        note_prefixes = [
+            "take note followings",
+            "take note following",
+            "take note of",
+            "take note",
+        ]
+        for prefix in note_prefixes:
+            if lowered.startswith(prefix):
+                content = text[len(prefix) :].strip(" :,-")
+                intent = {
+                    "intent": "note",
+                    "command": "notepad_append",
+                    "content": content,
+                    "confidence": 1.0,
+                }
+                return intent
         tab_number = _parse_tab_number(text)
         if tab_number is not None:
             intent = {
@@ -826,6 +842,15 @@ class Assistant:
             _open_url(url)
             response = f"Searching {engine} for: {query}"
             self.last_search[session_id] = query
+
+        elif intent_type == "note":
+            content = intent.get("content", "").strip()
+            saved_intent["content"] = content
+            if content:
+                _run_ahk("notepad_append", content)
+                response = f"Noted: {content}"
+            else:
+                response = "I didn't hear what to note."
 
         else:
             image_data_url = None

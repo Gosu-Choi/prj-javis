@@ -91,3 +91,4 @@ Set `VISION_MODEL` to a vision-capable model (e.g., `gpt-4o`) if your chat model
 - To reduce gaps between spoken chunks, set `TTS_STREAM_COALESCE_MS` (default 200ms).
 - To bring the UI to front on chat responses, set `APP_WINDOW_TITLE` to the window title.
 - Set `SHORT_AUDIO_REPEAT_SECONDS` (default 2). Voice taps shorter than this repeat the previous non-chat action without another GPT call; if the last intent was chat, the assistant logs `[ignored]` instead.
+- Say "Take note..." (e.g., "Take note followings ...") to append the rest of the utterance to Notepad; the app opens Notepad if needed and adds a new line before your note.

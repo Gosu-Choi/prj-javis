@@ -17,6 +17,43 @@ if (action = "page_up") {
     ExitApp
 }
 
+if (action = "scroll_down") {
+    Sleep 50
+    Send "{WheelDown 6}"
+    ExitApp
+}
+
+if (action = "scroll_up") {
+    Sleep 50
+    Send "{WheelUp 6}"
+    ExitApp
+}
+
+if (action = "notepad_append") {
+    note := param
+    if !WinExist("ahk_exe notepad.exe") {
+        Send "#r"
+        WinWaitActive "ahk_class #32770", , 2
+        if WinActive("ahk_class #32770") {
+            SendText "notepad"
+            Send "{Enter}"
+        } else {
+            Run "notepad.exe"
+        }
+        WinWaitActive "ahk_exe notepad.exe", , 3
+    } else {
+        WinActivate "ahk_exe notepad.exe"
+        WinWaitActive "ahk_exe notepad.exe", , 1
+    }
+    Send "{End}"
+    Send "{Enter}"
+    if (note != "") {
+        SendText note
+        Send "{Enter}"
+    }
+    ExitApp
+}
+
 if (action = "find") {
     Send "^f"
     if (param != "") {
