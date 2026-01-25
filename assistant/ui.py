@@ -119,10 +119,20 @@ class AssistantUI:
         self._append_system(f"Screenshots {'enabled' if enabled else 'disabled'}")
 
     def _register_hotkeys(self):
+        self._enable_record_hotkey()
+        self._enable_session_hotkeys()
+
+    def _enable_record_hotkey(self):
+        if "page_up_record" in self._hotkey_handles:
+            return
         self._hotkey_handles["page_up_record"] = keyboard.add_hotkey(
             "page up", self._hotkey_toggle_record, suppress=True
         )
-        self._enable_session_hotkeys()
+
+    def _disable_record_hotkey(self):
+        handle = self._hotkey_handles.pop("page_up_record", None)
+        if handle is not None:
+            keyboard.remove_hotkey(handle)
 
     def _enable_session_hotkeys(self):
         if self._session_hotkeys_active:
@@ -157,9 +167,14 @@ class AssistantUI:
 
     def _suspend_session_hotkeys(self, duration_ms: int = 300):
         self._disable_session_hotkeys()
+        self._disable_record_hotkey()
         if self._session_hotkey_resume_job:
             self.root.after_cancel(self._session_hotkey_resume_job)
-        self._session_hotkey_resume_job = self.root.after(duration_ms, self._enable_session_hotkeys)
+        self._session_hotkey_resume_job = self.root.after(duration_ms, self._resume_hotkeys)
+
+    def _resume_hotkeys(self):
+        self._enable_session_hotkeys()
+        self._enable_record_hotkey()
 
     def _toggle_record_from_hotkey(self):
         if self.mode.get() != "voice":

@@ -749,6 +749,7 @@ class Assistant:
     ) -> str:
         intent = intent or {"intent": "chat"}
         intent_type = intent.get("intent", "chat")
+        speak_allowed = intent_type == "chat"
         saved_intent = dict(intent)
 
         if intent_type == "zotero_command":
@@ -847,8 +848,11 @@ class Assistant:
             history.append({"role": "assistant", "content": response})
 
         response = response.replace("\n\n", "\n")
-        if not _tts_streamed_last:
-            _speak(response)
+        if speak_allowed:
+            if not _tts_streamed_last:
+                _speak(response)
+        else:
+            stop_tts()
         self._remember_action(session_id, saved_intent, transcript, response)
         return response
 
