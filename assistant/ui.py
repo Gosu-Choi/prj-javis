@@ -48,6 +48,7 @@ class AssistantUI:
         ttk.Checkbutton(top, text="Screenshots", variable=self.screenshot_var, command=self._toggle_screenshot).pack(
             side="left", padx=(10, 0)
         )
+        ttk.Button(top, text="Send Paper", command=self._send_paper).pack(side="left", padx=(10, 0))
 
         ttk.Label(top, text="Record:").pack(side="left", padx=(16, 0))
         ttk.Radiobutton(
@@ -117,6 +118,9 @@ class AssistantUI:
         enabled = bool(self.screenshot_var.get())
         self.assistant.set_screenshot_enabled(enabled)
         self._append_system(f"Screenshots {'enabled' if enabled else 'disabled'}")
+
+    def _send_paper(self):
+        self._run_async(self.assistant.ingest_paper, show_user=False)
 
     def _register_hotkeys(self):
         self._enable_record_hotkey()

@@ -4,3 +4,4 @@ sounddevice
 keyboard
 mss
 pillow
+PyPDF2

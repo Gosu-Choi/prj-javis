@@ -11,11 +11,13 @@ import time
 import wave
 from collections import deque
 import threading
+from pathlib import Path
 from urllib.parse import quote_plus
 
 import numpy as np
 import requests
 import sounddevice as sd
+from PyPDF2 import PdfReader
 from mss import mss
 from PIL import Image
 
@@ -63,6 +65,8 @@ SCREENSHOT_MAX_WIDTH = int(os.environ.get("SCREENSHOT_MAX_WIDTH", "1000"))
 SCREENSHOT_LOG_DIR = os.environ.get("SCREENSHOT_LOG_DIR", "log")
 SCREENSHOT_DEBUG = os.environ.get("SCREENSHOT_DEBUG", "0") == "1"
 SHORT_AUDIO_REPEAT_SECONDS = float(os.environ.get("SHORT_AUDIO_REPEAT_SECONDS", "2"))
+STT_INCLUDE_HISTORY = os.environ.get("STT_INCLUDE_HISTORY", "1") == "1"
+PAPER_EXPORT_DIR = os.environ.get("PAPER_EXPORT_DIR")
 
 ENABLE_POSTPROCESS = os.environ.get("ENABLE_POSTPROCESS", "1") == "1"
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "0") == "1"
@@ -201,9 +205,12 @@ def _record_utterance_manual(stop_event: "threading.Event") -> tuple[str, float]
 
 def _build_stt_prompt(history: list | None = None) -> str:
     base = STT_CONTEXT_HINT.strip()
-    if not history:
+    if not STT_INCLUDE_HISTORY or not history:
         return base
-    recent_user = [msg.get("content", "") for msg in history[-4:] if msg.get("role") == "user"]
+    recent_user = []
+    for msg in history[-4:]:
+        if msg.get("role") == "user":
+            recent_user.append(_content_as_text(msg.get("content", "")))
     if not recent_user:
         return base
     joined = " ".join(recent_user).strip()
@@ -254,13 +261,32 @@ def _parse_json(text: str) -> dict:
         raise
 
 
+def _content_as_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "text":
+                parts.append(item.get("text", ""))
+            elif item_type == "image_url":
+                url = item.get("image_url", {}).get("url", "")
+                if url:
+                    parts.append(f"[image: {url}]")
+        return "\n".join(parts)
+    return str(content)
+
+
 def _format_history(history: list) -> str:
     if not history:
         return "(none)"
     lines = []
     for msg in history[-6:]:
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        content = _content_as_text(msg.get("content", ""))
         if not content:
             continue
         label = "User" if role == "user" else "Assistant"
@@ -412,6 +438,68 @@ def _run_ahk(action: str, param: str | None = None) -> None:
     if param:
         args.append(param)
     subprocess.run(args, check=False)
+
+
+def _export_current_paper_file() -> Path:
+    if not PAPER_EXPORT_DIR:
+        raise RuntimeError("PAPER_EXPORT_DIR is not set in the environment.")
+    target_dir = Path(PAPER_EXPORT_DIR).expanduser()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    before = {}
+    for entry in target_dir.iterdir():
+        if entry.is_file():
+            before[entry.name] = entry.stat().st_mtime
+    _run_ahk("activate_window", "Zotero")
+    time.sleep(0.2)
+    _run_ahk("export_paper", str(target_dir))
+    deadline = time.time() + 15
+    newest: Path | None = None
+    newest_mtime = -1.0
+    while time.time() < deadline:
+        for entry in target_dir.iterdir():
+            if not entry.is_file():
+                continue
+            mtime = entry.stat().st_mtime
+            prev = before.get(entry.name, -1.0)
+            if prev == -1.0 or mtime > prev + 1e-3:
+                if mtime > newest_mtime:
+                    newest_mtime = mtime
+                    newest = entry
+        if newest is not None:
+            if newest.stat().st_size > 0:
+                return newest
+        time.sleep(0.25)
+    raise RuntimeError("Timed out while exporting paper from Zotero.")
+
+
+def _extract_pdf_chunks(path: Path, chunk_chars: int = 6000) -> list[tuple[str, str]]:
+    reader = PdfReader(str(path))
+    total_pages = len(reader.pages)
+    chunks = []
+    acc = []
+    acc_len = 0
+    chunk_start = 1
+    for idx, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        acc.append(f"[Page {idx}]\n{text.strip()}")
+        acc_len += len(text)
+        if acc_len >= chunk_chars:
+            end_label = idx
+            label = f"{chunk_start}-{end_label}" if chunk_start != end_label else f"{end_label}"
+            chunks.append((label, "\n\n".join(acc).strip()))
+            acc = []
+            acc_len = 0
+            chunk_start = idx + 1
+    if acc:
+        end_label = total_pages
+        label = f"{chunk_start}-{end_label}" if chunk_start != end_label else f"{end_label}"
+        chunks.append((label, "\n\n".join(acc).strip()))
+    if not chunks:
+        raise RuntimeError("No text could be extracted from the PDF.")
+    return chunks
 
 
 def _capture_fullscreen_png_data_url() -> str:
@@ -752,6 +840,24 @@ class Assistant:
             record_history=False,
         )
         return {"transcript": "", "response": response, "intent": intent}
+
+    def ingest_paper(self, session_id: str, on_stream=None, on_action=None, on_transcript=None) -> dict:
+        try:
+            path = _export_current_paper_file()
+            history = self._get_history(session_id)
+            chunks = _extract_pdf_chunks(path)
+            total = len(chunks)
+            for idx, (label, chunk_text) in enumerate(chunks, start=1):
+                history.append(
+                    {
+                        "role": "user",
+                        "content": f"[Paper {path.name} pages {label} chunk {idx}/{total}]\n{chunk_text}",
+                    }
+                )
+            response = f"Paper '{path.name}' converted to text ({total} chunks covering {len(chunks)} segments)."
+            return {"transcript": "", "response": response, "intent": {"intent": "note", "command": "paper"}}
+        except Exception as exc:
+            return {"transcript": "", "response": f"Paper transfer failed: {exc}", "intent": {"intent": "chat"}}
 
     def _dispatch(
         self,

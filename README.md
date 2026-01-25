@@ -92,3 +92,4 @@ Set `VISION_MODEL` to a vision-capable model (e.g., `gpt-4o`) if your chat model
 - To bring the UI to front on chat responses, set `APP_WINDOW_TITLE` to the window title.
 - Set `SHORT_AUDIO_REPEAT_SECONDS` (default 2). Voice taps shorter than this repeat the previous non-chat action without another GPT call; if the last intent was chat, the assistant logs `[ignored]` instead.
 - Say "Take note..." (e.g., "Take note followings ...") to append the rest of the utterance to Notepad; the app opens Notepad if needed and adds a new line before your note.
+- To share the currently focused Zotero paper with GPT, set `PAPER_EXPORT_DIR` to a writable folder. Click **Send Paper** in the UI—it exports the PDF, converts every page (at least the first 30) to text using PyPDF2, and streams the chunks into the active session history.

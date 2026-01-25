@@ -54,6 +54,51 @@ if (action = "notepad_append") {
     ExitApp
 }
 
+if (action = "export_paper") {
+    target := param
+    if (target = "") {
+        ExitApp
+    }
+    clipSaved := ClipboardAll()
+    Send "!f"
+    Sleep 120
+    Send "{Down}"
+    Sleep 120
+    Send "{Enter}"
+    if WinWaitActive("Export File", , 3) or WinWaitActive("Save", , 1) or WinWaitActive("Save As", , 1) {
+        Sleep 200
+        ControlFocus "Edit1", "A"
+        Sleep 80
+        Send "^a"
+        Sleep 80
+        Send "^c"
+        Sleep 80
+        filename := A_Clipboard
+        if (filename = "") {
+            filename := "paper.pdf"
+        }
+        ControlFocus "ToolbarWindow323", "A"
+        Sleep 80
+        Send "!d"
+        Sleep 80
+        SendText target
+        Sleep 120
+        Send "{Enter}"
+        Sleep 200
+        ControlFocus "Edit1", "A"
+        Sleep 80
+        Send "^a"
+        Sleep 80
+        SendText filename
+        Sleep 120
+        Send "{Enter}"
+        Sleep 300
+        Send "{Enter}"
+    }
+    A_Clipboard := clipSaved
+    ExitApp
+}
+
 if (action = "find") {
     Send "^f"
     if (param != "") {
